@@ -4,6 +4,18 @@ import { Prisma } from "@prisma/client";
 import { env } from "../config/env";
 
 type AnyObject = Record<string, unknown>;
+export type StatsPeriod = "day" | "week" | "month" | "year" | "custom";
+
+export type StatsRangeInput = {
+  period?: StatsPeriod;
+  from?: string;
+  to?: string;
+};
+
+type DateRange = {
+  gte: Date;
+  lte: Date;
+};
 
 const startedAt = new Date().toISOString();
 
@@ -31,6 +43,40 @@ function asDate(value: unknown): Date | undefined {
 
   const date = new Date(String(value));
   return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function resolveDateRange(input: StatsRangeInput = {}): DateRange | undefined {
+  const now = new Date();
+  const period = input.period;
+
+  if (!period) {
+    return undefined;
+  }
+
+  if (period === "custom") {
+    const from = asDate(input.from);
+    const to = asDate(input.to) ?? now;
+
+    if (!from || from > to) {
+      return undefined;
+    }
+
+    return { gte: from, lte: to };
+  }
+
+  const start = new Date(now);
+
+  if (period === "day") {
+    start.setDate(start.getDate() - 1);
+  } else if (period === "week") {
+    start.setDate(start.getDate() - 7);
+  } else if (period === "month") {
+    start.setMonth(start.getMonth() - 1);
+  } else if (period === "year") {
+    start.setFullYear(start.getFullYear() - 1);
+  }
+
+  return { gte: start, lte: now };
 }
 
 function resolveSessionId(payload: AnyObject): string {
@@ -196,13 +242,57 @@ export async function trackGoal(payload: AnyObject) {
 }
 
 export async function getStats() {
-  const [sessions, pageViews, pings, clicks, goals] = await Promise.all([
-    prisma.session.count(),
-    prisma.pageView.count(),
-    prisma.ping.count(),
-    prisma.click.count(),
-    prisma.goal.count(),
-  ]);
+  return getStatsByRange();
+}
+
+export async function getSessionsCount(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRange(rangeInput);
+
+  return prisma.session.count({
+    where: range ? { startTime: { gte: range.gte, lte: range.lte } } : undefined,
+  });
+}
+
+export async function getPageViewsCount(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRange(rangeInput);
+
+  return prisma.pageView.count({
+    where: range ? { timestamp: { gte: range.gte, lte: range.lte } } : undefined,
+  });
+}
+
+export async function getPingsCount(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRange(rangeInput);
+
+  return prisma.ping.count({
+    where: range ? { timestamp: { gte: range.gte, lte: range.lte } } : undefined,
+  });
+}
+
+export async function getClicksCount(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRange(rangeInput);
+
+  return prisma.click.count({
+    where: range ? { timestamp: { gte: range.gte, lte: range.lte } } : undefined,
+  });
+}
+
+export async function getGoalsCount(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRange(rangeInput);
+
+  return prisma.goal.count({
+    where: range ? { timestamp: { gte: range.gte, lte: range.lte } } : undefined,
+  });
+}
+
+export async function getStatsByRange(rangeInput: StatsRangeInput = {}) {
+  // Keep these queries sequential in serverless environments to avoid
+  // connection contention/hangs with pooled adapters.
+  const sessions = await getSessionsCount(rangeInput);
+  const pageViews = await getPageViewsCount(rangeInput);
+  const pings = await getPingsCount(rangeInput);
+  const clicks = await getClicksCount(rangeInput);
+  const goals = await getGoalsCount(rangeInput);
 
   return {
     startedAt,
