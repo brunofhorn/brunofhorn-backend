@@ -1,15 +1,33 @@
 import { randomUUID } from "node:crypto";
 import { FastifyInstance } from "fastify";
-import { createAdminSession, logoutAdmin } from "../lib/db";
+import { createAdminSession, logoutAdmin, verifyAdminCredentials } from "../lib/db";
 
 export async function authRoutes(app: FastifyInstance) {
-  app.post<{ Body: { password?: string } }>("/api/auth/login", async (request) => {
-    const _password = request.body?.password;
+  app.post<{ Body: { email?: string; password?: string } }>("/api/auth/login", async (request, reply) => {
+    const email = request.body?.email?.trim();
+    const password = request.body?.password;
+
+    if (!email || !password) {
+      reply.status(400);
+      return { error: "Email e senha sao obrigatorios." };
+    }
+
+    const admin = await verifyAdminCredentials(email, password);
+    if (!admin) {
+      reply.status(401);
+      return { error: "Credenciais invalidas." };
+    }
 
     const token = randomUUID();
-    await createAdminSession(token);
+    await createAdminSession(token, admin.id);
 
-    return { token };
+    return {
+      token,
+      user: {
+        id: admin.id,
+        email: admin.email,
+      },
+    };
   });
 
   app.post("/api/auth/logout", async (request) => {

@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { prisma } from "./prisma";
 import { Prisma } from "@prisma/client";
+import { env } from "../config/env";
 
 type AnyObject = Record<string, unknown>;
 
@@ -45,6 +46,32 @@ function toJsonValue(payload: AnyObject): Prisma.InputJsonValue{
   return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
 }
 
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString("hex");
+  const key = scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${key}`;
+}
+
+function verifyPassword(password: string, hashedPassword: string): boolean {
+  const [salt, key] = hashedPassword.split(":");
+  if (!salt || !key) {
+    return false;
+  }
+
+  const derived = scryptSync(password, salt, 64);
+  const stored = Buffer.from(key, "hex");
+
+  if (stored.length !== derived.length) {
+    return false;
+  }
+
+  return timingSafeEqual(stored, derived);
+}
+
 async function ensureSession(sessionId: string, payload: AnyObject = {}) {
   const startTime = asDate(payload.startTime) ?? asDate(payload.timestamp) ?? new Date();
   const duration = asNumber(payload.duration) ?? 0;
@@ -77,6 +104,10 @@ async function ensureSession(sessionId: string, payload: AnyObject = {}) {
 
 export async function initDb() {
   await prisma.$connect();
+
+  if (env.adminEmail && env.adminPassword) {
+    await upsertAdminUser(env.adminEmail, env.adminPassword);
+  }
 }
 
 export async function trackSession(payload: AnyObject) {
@@ -185,9 +216,51 @@ export async function getStats() {
   };
 }
 
-export async function createAdminSession(token: string) {
+export async function upsertAdminUser(email: string, password: string) {
+  const normalizedEmail = normalizeEmail(email);
+  const passwordHash = hashPassword(password);
+
+  return prisma.adminUser.upsert({
+    where: { email: normalizedEmail },
+    update: {
+      passwordHash,
+      isActive: true,
+    },
+    create: {
+      email: normalizedEmail,
+      passwordHash,
+    },
+  });
+}
+
+export async function verifyAdminCredentials(email: string, password: string) {
+  const normalizedEmail = normalizeEmail(email);
+
+  const adminUser = await prisma.adminUser.findUnique({
+    where: { email: normalizedEmail },
+    select: {
+      id: true,
+      email: true,
+      passwordHash: true,
+      isActive: true,
+    },
+  });
+
+  if (!adminUser || !adminUser.isActive) {
+    return null;
+  }
+
+  const isPasswordValid = verifyPassword(password, adminUser.passwordHash);
+  if (!isPasswordValid) {
+    return null;
+  }
+
+  return { id: adminUser.id, email: adminUser.email };
+}
+
+export async function createAdminSession(token: string, adminUserId: number) {
   await prisma.adminSession.create({
-    data: { id: token },
+    data: { id: token, adminUserId },
   });
 }
 
