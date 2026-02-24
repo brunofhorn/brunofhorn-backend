@@ -17,6 +17,7 @@ type DateRange = {
   lte: Date;
 };
 type DailyMetricField = "sessions" | "pageViews" | "pings" | "clicks" | "goals";
+export type ReportMetric = "sessions" | "pageViews" | "pings" | "clicks" | "goals";
 
 const startedAt = new Date().toISOString();
 
@@ -78,6 +79,15 @@ function resolveDateRange(input: StatsRangeInput = {}): DateRange | undefined {
   }
 
   return { gte: start, lte: now };
+}
+
+function resolveDateRangeOrAll(input: StatsRangeInput = {}): DateRange {
+  return (
+    resolveDateRange(input) ?? {
+      gte: new Date("1970-01-01T00:00:00.000Z"),
+      lte: new Date(),
+    }
+  );
 }
 
 function toUtcDateOnly(value: Date): Date {
@@ -176,6 +186,8 @@ async function ensureSession(sessionId: string, payload: AnyObject = {}) {
         browser: asString(payload.browser),
         os: asString(payload.os),
         country: asString(payload.country),
+        city: asString(payload.city),
+        ipAddress: asString(payload.ipAddress) ?? asString(payload.ip),
       },
     });
 
@@ -193,6 +205,8 @@ async function ensureSession(sessionId: string, payload: AnyObject = {}) {
       browser: asString(payload.browser),
       os: asString(payload.os),
       country: asString(payload.country),
+      city: asString(payload.city),
+      ipAddress: asString(payload.ipAddress) ?? asString(payload.ip),
     },
   });
 
@@ -380,6 +394,277 @@ export async function getStatsByRange(rangeInput: StatsRangeInput = {}) {
       clicks,
       goals,
     },
+  };
+}
+
+export async function getReportOverview(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRange(rangeInput);
+  const [sessions, pageViews, pings, clicks, goals, durationAgg] = await Promise.all([
+    getSessionsCount(rangeInput),
+    getPageViewsCount(rangeInput),
+    getPingsCount(rangeInput),
+    getClicksCount(rangeInput),
+    getGoalsCount(rangeInput),
+    prisma.session.aggregate({
+      where: range
+        ? {
+            startTime: {
+              gte: range.gte,
+              lte: range.lte,
+            },
+          }
+        : undefined,
+      _avg: { duration: true },
+      _max: { duration: true },
+    }),
+  ]);
+
+  return {
+    totals: {
+      sessions,
+      pageViews,
+      pings,
+      clicks,
+      goals,
+    },
+    engagement: {
+      clickThroughRate: pageViews > 0 ? Number((clicks / pageViews).toFixed(4)) : 0,
+      goalsPerSession: sessions > 0 ? Number((goals / sessions).toFixed(4)) : 0,
+      avgSessionDuration: Math.round(durationAgg._avg.duration ?? 0),
+      maxSessionDuration: durationAgg._max.duration ?? 0,
+    },
+  };
+}
+
+export async function getReportTimeseries(
+  rangeInput: StatsRangeInput = {},
+  metric?: ReportMetric,
+) {
+  const rows = await prisma.dailyStats.findMany({
+    where: toDailyWhere(resolveDateRange(rangeInput)),
+    orderBy: { date: "asc" },
+    select: {
+      date: true,
+      sessions: true,
+      pageViews: true,
+      pings: true,
+      clicks: true,
+      goals: true,
+    },
+  });
+
+  if (metric) {
+    return rows.map((row) => ({
+      date: row.date.toISOString().slice(0, 10),
+      value: row[metric],
+    }));
+  }
+
+  return rows.map((row) => ({
+    date: row.date.toISOString().slice(0, 10),
+    sessions: row.sessions,
+    pageViews: row.pageViews,
+    pings: row.pings,
+    clicks: row.clicks,
+    goals: row.goals,
+  }));
+}
+
+export async function getReportTopLinks(rangeInput: StatsRangeInput = {}, limit = 20) {
+  const safeLimit = Math.max(1, Math.min(limit, 100));
+  const range = resolveDateRangeOrAll(rangeInput);
+
+  const rows = await prisma.$queryRaw<
+    Array<{ label: string | null; url: string | null; clicks: number }>
+  >(
+    Prisma.sql`
+      SELECT
+        COALESCE(NULLIF(c.metadata->>'label', ''), NULLIF(c.element_text, ''), NULLIF(c.element_id, ''), c.page_path) AS label,
+        NULLIF(c.metadata->>'url', '') AS url,
+        COUNT(*)::int AS clicks
+      FROM clicks c
+      WHERE c.timestamp >= ${range.gte} AND c.timestamp <= ${range.lte}
+        AND COALESCE(c.metadata->>'kind', '') IN ('social', 'link-card')
+      GROUP BY 1, 2
+      ORDER BY clicks DESC
+      LIMIT ${safeLimit}
+    `,
+  );
+
+  return rows.map((row) => ({
+    label: row.label ?? "unknown",
+    url: row.url ?? null,
+    clicks: Number(row.clicks),
+  }));
+}
+
+export async function getReportTopSetupItems(rangeInput: StatsRangeInput = {}, limit = 20) {
+  const safeLimit = Math.max(1, Math.min(limit, 100));
+  const range = resolveDateRangeOrAll(rangeInput);
+
+  const rows = await prisma.$queryRaw<Array<{ item: string | null; clicks: number }>>(
+    Prisma.sql`
+      SELECT
+        COALESCE(NULLIF(c.metadata->>'label', ''), NULLIF(c.element_text, ''), 'unknown') AS item,
+        COUNT(*)::int AS clicks
+      FROM clicks c
+      WHERE c.timestamp >= ${range.gte} AND c.timestamp <= ${range.lte}
+        AND COALESCE(c.metadata->>'kind', '') = 'setup'
+      GROUP BY 1
+      ORDER BY clicks DESC
+      LIMIT ${safeLimit}
+    `,
+  );
+
+  return rows.map((row) => ({
+    item: row.item ?? "unknown",
+    clicks: Number(row.clicks),
+  }));
+}
+
+export async function getReportBaseAccesses(rangeInput: StatsRangeInput = {}, basePath = "/") {
+  const range = resolveDateRangeOrAll(rangeInput);
+
+  const rows = await prisma.$queryRaw<Array<{ accesses: number }>>(
+    Prisma.sql`
+      SELECT COUNT(*)::int AS accesses
+      FROM page_views p
+      WHERE p.timestamp >= ${range.gte}
+        AND p.timestamp <= ${range.lte}
+        AND p.path = ${basePath}
+    `,
+  );
+
+  return Number(rows[0]?.accesses ?? 0);
+}
+
+export async function getReportButtonClicks(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRangeOrAll(rangeInput);
+
+  const rows = await prisma.$queryRaw<Array<{ clicks: number }>>(
+    Prisma.sql`
+      SELECT COUNT(*)::int AS clicks
+      FROM clicks c
+      WHERE c.timestamp >= ${range.gte}
+        AND c.timestamp <= ${range.lte}
+    `,
+  );
+
+  return Number(rows[0]?.clicks ?? 0);
+}
+
+export async function getReportPages(rangeInput: StatsRangeInput = {}, limit = 20) {
+  const safeLimit = Math.max(1, Math.min(limit, 100));
+  const range = resolveDateRangeOrAll(rangeInput);
+
+  const rows = await prisma.$queryRaw<
+    Array<{ path: string; views: number; sessions: number }>
+  >(
+    Prisma.sql`
+      SELECT
+        p.path AS path,
+        COUNT(*)::int AS views,
+        COUNT(DISTINCT p.session_id)::int AS sessions
+      FROM page_views p
+      WHERE p.timestamp >= ${range.gte} AND p.timestamp <= ${range.lte}
+      GROUP BY p.path
+      ORDER BY views DESC
+      LIMIT ${safeLimit}
+    `,
+  );
+
+  return rows.map((row) => ({
+    path: row.path,
+    views: Number(row.views),
+    sessions: Number(row.sessions),
+  }));
+}
+
+export async function getReportDevices(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRangeOrAll(rangeInput);
+
+  const rows = await prisma.$queryRaw<Array<{ device: string; sessions: number }>>(
+    Prisma.sql`
+      SELECT
+        CASE
+          WHEN s.device_type IS NOT NULL AND s.device_type <> '' THEN LOWER(s.device_type)
+          WHEN s.user_agent IS NULL OR s.user_agent = '' THEN 'unknown'
+          WHEN s.user_agent ILIKE '%ipad%' OR s.user_agent ILIKE '%tablet%' THEN 'tablet'
+          WHEN s.user_agent ILIKE '%mobile%' OR s.user_agent ILIKE '%android%' OR s.user_agent ILIKE '%iphone%' THEN 'mobile'
+          ELSE 'desktop'
+        END AS device,
+        COUNT(*)::int AS sessions
+      FROM sessions s
+      WHERE s.start_time >= ${range.gte} AND s.start_time <= ${range.lte}
+      GROUP BY 1
+      ORDER BY sessions DESC
+    `,
+  );
+
+  return rows.map((row) => ({
+    device: row.device,
+    sessions: Number(row.sessions),
+  }));
+}
+
+export async function getReportTopDevice(rangeInput: StatsRangeInput = {}) {
+  const devices = await getReportDevices(rangeInput);
+  const top = devices[0];
+
+  return top ?? { device: "unknown", sessions: 0 };
+}
+
+export async function getReportCities(rangeInput: StatsRangeInput = {}, limit = 20) {
+  const safeLimit = Math.max(1, Math.min(limit, 100));
+  const range = resolveDateRangeOrAll(rangeInput);
+
+  const rows = await prisma.$queryRaw<Array<{ city: string; sessions: number }>>(
+    Prisma.sql`
+      SELECT
+        COALESCE(NULLIF(s.city, ''), 'unknown') AS city,
+        COUNT(*)::int AS sessions
+      FROM sessions s
+      WHERE s.start_time >= ${range.gte} AND s.start_time <= ${range.lte}
+      GROUP BY 1
+      ORDER BY sessions DESC
+      LIMIT ${safeLimit}
+    `,
+  );
+
+  return rows.map((row) => ({
+    city: row.city,
+    sessions: Number(row.sessions),
+  }));
+}
+
+export async function getReportSessionDuration(rangeInput: StatsRangeInput = {}) {
+  const range = resolveDateRangeOrAll(rangeInput);
+
+  const stats = await prisma.$queryRaw<
+    Array<{
+      avgDuration: number | null;
+      maxDuration: number | null;
+      minDuration: number | null;
+      sessions: number;
+    }>
+  >(
+    Prisma.sql`
+      SELECT
+        ROUND(AVG(s.duration))::int AS "avgDuration",
+        MAX(s.duration)::int AS "maxDuration",
+        MIN(s.duration)::int AS "minDuration",
+        COUNT(*)::int AS sessions
+      FROM sessions s
+      WHERE s.start_time >= ${range.gte} AND s.start_time <= ${range.lte}
+    `,
+  );
+
+  const row = stats[0];
+  return {
+    avgDuration: Number(row?.avgDuration ?? 0),
+    maxDuration: Number(row?.maxDuration ?? 0),
+    minDuration: Number(row?.minDuration ?? 0),
+    sessions: Number(row?.sessions ?? 0),
   };
 }
 

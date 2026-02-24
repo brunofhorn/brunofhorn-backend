@@ -16,6 +16,8 @@ model Session {
   browser      String?
   os           String?
   country      String?
+  city         String?
+  ipAddress    String?    @map("ip_address")
   createdAt    DateTime   @default(now()) @map("created_at")
   updatedAt    DateTime   @updatedAt @map("updated_at")
   clicks       Click[]
@@ -24,6 +26,7 @@ model Session {
   goals        Goal[]
 
   @@index([startTime])
+  @@index([city])
   @@map("sessions")
 }
 

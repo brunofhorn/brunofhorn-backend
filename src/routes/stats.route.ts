@@ -1,4 +1,4 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import {
   getClicksCount,
   getGoalsCount,
@@ -7,7 +7,6 @@ import {
   getSessionsCount,
   getStatsByRange,
   StatsPeriod,
-  verifyAdminToken,
 } from "../lib/db";
 
 type StatsQuery = {
@@ -15,11 +14,6 @@ type StatsQuery = {
   from?: string;
   to?: string;
 };
-
-function requireAuth(_request: FastifyRequest, _reply: FastifyReply) {
-  // Authentication kept disabled to mirror existing behavior.
-  return;
-}
 
 function parseStatsQuery(query: StatsQuery) {
   const allowedPeriods = new Set<StatsPeriod>(["day", "week", "month", "year", "custom"]);
@@ -53,19 +47,9 @@ function getErrorStatus(error: unknown): 500 | 504 {
   return error instanceof Error && error.message === "Stats query timeout" ? 504 : 500;
 }
 
-async function validateOptionalToken(request: FastifyRequest) {
-  const authHeader = request.headers.authorization;
-  if (authHeader?.startsWith("Bearer ")) {
-    const token = authHeader.split(" ")[1];
-    await verifyAdminToken(token);
-  }
-}
-
 export async function statsRoutes(app: FastifyInstance) {
-  app.get<{ Querystring: StatsQuery }>("/api/stats/summary", { preHandler: requireAuth }, async (request, reply) => {
+  app.get<{ Querystring: StatsQuery }>("/api/stats/summary", async (request, reply) => {
     try {
-      await validateOptionalToken(request);
-
       const parsed = parseStatsQuery(request.query);
       if ("error" in parsed) {
         reply.status(400);
@@ -82,9 +66,8 @@ export async function statsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get<{ Querystring: StatsQuery }>("/api/stats/clicks", { preHandler: requireAuth }, async (request, reply) => {
+  app.get<{ Querystring: StatsQuery }>("/api/stats/clicks", async (request, reply) => {
     try {
-      await validateOptionalToken(request);
       const parsed = parseStatsQuery(request.query);
       if ("error" in parsed) {
         reply.status(400);
@@ -100,9 +83,8 @@ export async function statsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get<{ Querystring: StatsQuery }>("/api/stats/accesses", { preHandler: requireAuth }, async (request, reply) => {
+  app.get<{ Querystring: StatsQuery }>("/api/stats/accesses", async (request, reply) => {
     try {
-      await validateOptionalToken(request);
       const parsed = parseStatsQuery(request.query);
       if ("error" in parsed) {
         reply.status(400);
@@ -118,9 +100,8 @@ export async function statsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get<{ Querystring: StatsQuery }>("/api/stats/sessions", { preHandler: requireAuth }, async (request, reply) => {
+  app.get<{ Querystring: StatsQuery }>("/api/stats/sessions", async (request, reply) => {
     try {
-      await validateOptionalToken(request);
       const parsed = parseStatsQuery(request.query);
       if ("error" in parsed) {
         reply.status(400);
@@ -136,9 +117,8 @@ export async function statsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get<{ Querystring: StatsQuery }>("/api/stats/pings", { preHandler: requireAuth }, async (request, reply) => {
+  app.get<{ Querystring: StatsQuery }>("/api/stats/pings", async (request, reply) => {
     try {
-      await validateOptionalToken(request);
       const parsed = parseStatsQuery(request.query);
       if ("error" in parsed) {
         reply.status(400);
@@ -154,9 +134,8 @@ export async function statsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get<{ Querystring: StatsQuery }>("/api/stats/goals", { preHandler: requireAuth }, async (request, reply) => {
+  app.get<{ Querystring: StatsQuery }>("/api/stats/goals", async (request, reply) => {
     try {
-      await validateOptionalToken(request);
       const parsed = parseStatsQuery(request.query);
       if ("error" in parsed) {
         reply.status(400);
