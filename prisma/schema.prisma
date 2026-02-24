@@ -109,3 +109,16 @@ model AdminUser {
 
   @@map("admin_users")
 }
+
+model DailyStats {
+  date      DateTime @id @db.Date
+  sessions  Int      @default(0)
+  pageViews Int      @default(0) @map("page_views")
+  pings     Int      @default(0)
+  clicks    Int      @default(0)
+  goals     Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("daily_stats")
+}

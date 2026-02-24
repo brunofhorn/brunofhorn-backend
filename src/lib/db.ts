@@ -16,6 +16,7 @@ type DateRange = {
   gte: Date;
   lte: Date;
 };
+type DailyMetricField = "sessions" | "pageViews" | "pings" | "clicks" | "goals";
 
 const startedAt = new Date().toISOString();
 
@@ -79,6 +80,23 @@ function resolveDateRange(input: StatsRangeInput = {}): DateRange | undefined {
   return { gte: start, lte: now };
 }
 
+function toUtcDateOnly(value: Date): Date {
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
+}
+
+function toDailyWhere(range?: DateRange) {
+  if (!range) {
+    return undefined;
+  }
+
+  return {
+    date: {
+      gte: toUtcDateOnly(range.gte),
+      lte: toUtcDateOnly(range.lte),
+    },
+  };
+}
+
 function resolveSessionId(payload: AnyObject): string {
   return (
     asString(payload.sessionId) ??
@@ -118,23 +136,54 @@ function verifyPassword(password: string, hashedPassword: string): boolean {
   return timingSafeEqual(stored, derived);
 }
 
+async function incrementDailyMetric(metric: DailyMetricField, at: Date) {
+  const day = toUtcDateOnly(at);
+
+  await prisma.dailyStats.upsert({
+    where: { date: day },
+    update: {
+      [metric]: { increment: 1 },
+    },
+    create: {
+      date: day,
+      sessions: metric === "sessions" ? 1 : 0,
+      pageViews: metric === "pageViews" ? 1 : 0,
+      pings: metric === "pings" ? 1 : 0,
+      clicks: metric === "clicks" ? 1 : 0,
+      goals: metric === "goals" ? 1 : 0,
+    },
+  });
+}
+
 async function ensureSession(sessionId: string, payload: AnyObject = {}) {
   const startTime = asDate(payload.startTime) ?? asDate(payload.timestamp) ?? new Date();
   const duration = asNumber(payload.duration) ?? 0;
   const lastPingTime = asDate(payload.lastPingTime) ?? asDate(payload.timestamp) ?? startTime;
 
-  await prisma.session.upsert({
+  const existing = await prisma.session.findUnique({
     where: { id: sessionId },
-    update: {
-      lastPingTime,
-      duration,
-      userAgent: asString(payload.userAgent),
-      deviceType: asString(payload.deviceType),
-      browser: asString(payload.browser),
-      os: asString(payload.os),
-      country: asString(payload.country),
-    },
-    create: {
+    select: { id: true },
+  });
+
+  if (existing) {
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: {
+        lastPingTime,
+        duration,
+        userAgent: asString(payload.userAgent),
+        deviceType: asString(payload.deviceType),
+        browser: asString(payload.browser),
+        os: asString(payload.os),
+        country: asString(payload.country),
+      },
+    });
+
+    return { created: false, startTime };
+  }
+
+  await prisma.session.create({
+    data: {
       id: sessionId,
       startTime,
       lastPingTime,
@@ -146,6 +195,8 @@ async function ensureSession(sessionId: string, payload: AnyObject = {}) {
       country: asString(payload.country),
     },
   });
+
+  return { created: true, startTime };
 }
 
 export async function initDb() {
@@ -158,22 +209,30 @@ export async function initDb() {
 
 export async function trackSession(payload: AnyObject) {
   const sessionId = resolveSessionId(payload);
-  await ensureSession(sessionId, payload);
+  const ensured = await ensureSession(sessionId, payload);
+
+  if (ensured.created) {
+    await incrementDailyMetric("sessions", ensured.startTime);
+  }
+
   return { sessionId };
 }
 
 export async function trackPageView(payload: AnyObject) {
   const sessionId = resolveSessionId(payload);
   await ensureSession(sessionId, payload);
+  const timestamp = asDate(payload.timestamp) ?? new Date();
 
   await prisma.pageView.create({
     data: {
       sessionId,
       path: asString(payload.path) ?? asString(payload.pagePath) ?? "/",
-      timestamp: asDate(payload.timestamp) ?? new Date(),
+      timestamp,
       metadata: toJsonValue(payload),
     },
   });
+
+  await incrementDailyMetric("pageViews", timestamp);
 }
 
 export async function trackPing(payload: AnyObject) {
@@ -200,11 +259,14 @@ export async function trackPing(payload: AnyObject) {
       duration,
     },
   });
+
+  await incrementDailyMetric("pings", timestamp);
 }
 
 export async function trackClick(payload: AnyObject) {
   const sessionId = resolveSessionId(payload);
   await ensureSession(sessionId, payload);
+  const timestamp = asDate(payload.timestamp) ?? new Date();
 
   await prisma.click.create({
     data: {
@@ -216,10 +278,12 @@ export async function trackClick(payload: AnyObject) {
       x: asNumber(payload.x) ?? 0,
       y: asNumber(payload.y) ?? 0,
       pagePath: asString(payload.pagePath) ?? asString(payload.path) ?? "/",
-      timestamp: asDate(payload.timestamp) ?? new Date(),
+      timestamp,
       metadata: toJsonValue(payload),
     },
   });
+
+  await incrementDailyMetric("clicks", timestamp);
 }
 
 export async function trackGoal(payload: AnyObject) {
@@ -229,16 +293,19 @@ export async function trackGoal(payload: AnyObject) {
     await ensureSession(maybeSessionId, payload);
   }
 
+  const timestamp = asDate(payload.timestamp) ?? new Date();
   await prisma.goal.create({
     data: {
       sessionId: maybeSessionId,
       name: asString(payload.name) ?? asString(payload.goalName) ?? "goal",
       value: asNumber(payload.value),
       path: asString(payload.path) ?? asString(payload.pagePath),
-      timestamp: asDate(payload.timestamp) ?? new Date(),
+      timestamp,
       metadata: toJsonValue(payload),
     },
   });
+
+  await incrementDailyMetric("goals", timestamp);
 }
 
 export async function getStats() {
@@ -247,42 +314,52 @@ export async function getStats() {
 
 export async function getSessionsCount(rangeInput: StatsRangeInput = {}) {
   const range = resolveDateRange(rangeInput);
-
-  return prisma.session.count({
-    where: range ? { startTime: { gte: range.gte, lte: range.lte } } : undefined,
+  const result = await prisma.dailyStats.aggregate({
+    where: toDailyWhere(range),
+    _sum: { sessions: true },
   });
+
+  return result._sum.sessions ?? 0;
 }
 
 export async function getPageViewsCount(rangeInput: StatsRangeInput = {}) {
   const range = resolveDateRange(rangeInput);
-
-  return prisma.pageView.count({
-    where: range ? { timestamp: { gte: range.gte, lte: range.lte } } : undefined,
+  const result = await prisma.dailyStats.aggregate({
+    where: toDailyWhere(range),
+    _sum: { pageViews: true },
   });
+
+  return result._sum.pageViews ?? 0;
 }
 
 export async function getPingsCount(rangeInput: StatsRangeInput = {}) {
   const range = resolveDateRange(rangeInput);
-
-  return prisma.ping.count({
-    where: range ? { timestamp: { gte: range.gte, lte: range.lte } } : undefined,
+  const result = await prisma.dailyStats.aggregate({
+    where: toDailyWhere(range),
+    _sum: { pings: true },
   });
+
+  return result._sum.pings ?? 0;
 }
 
 export async function getClicksCount(rangeInput: StatsRangeInput = {}) {
   const range = resolveDateRange(rangeInput);
-
-  return prisma.click.count({
-    where: range ? { timestamp: { gte: range.gte, lte: range.lte } } : undefined,
+  const result = await prisma.dailyStats.aggregate({
+    where: toDailyWhere(range),
+    _sum: { clicks: true },
   });
+
+  return result._sum.clicks ?? 0;
 }
 
 export async function getGoalsCount(rangeInput: StatsRangeInput = {}) {
   const range = resolveDateRange(rangeInput);
-
-  return prisma.goal.count({
-    where: range ? { timestamp: { gte: range.gte, lte: range.lte } } : undefined,
+  const result = await prisma.dailyStats.aggregate({
+    where: toDailyWhere(range),
+    _sum: { goals: true },
   });
+
+  return result._sum.goals ?? 0;
 }
 
 export async function getStatsByRange(rangeInput: StatsRangeInput = {}) {
