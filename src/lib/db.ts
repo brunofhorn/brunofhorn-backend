@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "./prisma";
+import { Prisma } from "@prisma/client";
 
 type AnyObject = Record<string, unknown>;
 
