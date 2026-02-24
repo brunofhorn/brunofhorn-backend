@@ -1,0 +1,91 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Session {
+  id           String     @id
+  startTime    DateTime   @default(now()) @map("start_time")
+  lastPingTime DateTime   @default(now()) @map("last_ping_time")
+  duration     Int        @default(0)
+  userAgent    String?    @map("user_agent")
+  deviceType   String?    @map("device_type")
+  browser      String?
+  os           String?
+  country      String?
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  clicks       Click[]
+  pageViews    PageView[]
+  pings        Ping[]
+  goals        Goal[]
+
+  @@map("sessions")
+}
+
+model Click {
+  id           Int      @id @default(autoincrement())
+  sessionId    String   @map("session_id")
+  session      Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  elementTag   String?  @map("element_tag")
+  elementId    String?  @map("element_id")
+  elementClass String?  @map("element_class")
+  elementText  String?  @map("element_text")
+  x            Int      @default(0)
+  y            Int      @default(0)
+  pagePath     String   @map("page_path")
+  timestamp    DateTime @default(now())
+  metadata     Json?
+
+  @@index([sessionId])
+  @@map("clicks")
+}
+
+model PageView {
+  id        Int      @id @default(autoincrement())
+  sessionId String   @map("session_id")
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  path      String
+  timestamp DateTime @default(now())
+  metadata  Json?
+
+  @@index([sessionId])
+  @@map("page_views")
+}
+
+model Ping {
+  id        Int      @id @default(autoincrement())
+  sessionId String   @map("session_id")
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  duration  Int      @default(0)
+  pagePath  String?  @map("page_path")
+  timestamp DateTime @default(now())
+  metadata  Json?
+
+  @@index([sessionId])
+  @@map("pings")
+}
+
+model Goal {
+  id        Int      @id @default(autoincrement())
+  sessionId String?  @map("session_id")
+  session   Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  name      String
+  value     Float?
+  path      String?
+  timestamp DateTime @default(now())
+  metadata  Json?
+
+  @@index([sessionId])
+  @@map("goals")
+}
+
+model AdminSession {
+  id        String   @id
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("admin_sessions")
+}

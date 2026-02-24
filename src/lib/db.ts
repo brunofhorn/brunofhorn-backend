@@ -1,72 +1,206 @@
+import { randomUUID } from "node:crypto";
+import { prisma } from "./prisma";
+
 type AnyObject = Record<string, unknown>;
 
-const sessions: AnyObject[] = [];
-const pageViews: AnyObject[] = [];
-const pings: AnyObject[] = [];
-const clicks: AnyObject[] = [];
-const goals: AnyObject[] = [];
-const adminSessions = new Set<string>();
+const startedAt = new Date().toISOString();
 
-let startedAt = new Date().toISOString();
-
-function withTrackedAt(payload: AnyObject): AnyObject {
-  return {
-    ...payload,
-    trackedAt: new Date().toISOString(),
-  };
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
-export function initDb() {
-  sessions.length = 0;
-  pageViews.length = 0;
-  pings.length = 0;
-  clicks.length = 0;
-  goals.length = 0;
-  adminSessions.clear();
-  startedAt = new Date().toISOString();
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
 }
 
-export function trackSession(payload: AnyObject) {
-  sessions.push(withTrackedAt(payload));
+function asDate(value: unknown): Date | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
-export function trackPageView(payload: AnyObject) {
-  pageViews.push(withTrackedAt(payload));
+function resolveSessionId(payload: AnyObject): string {
+  return (
+    asString(payload.sessionId) ??
+    asString(payload.session_id) ??
+    asString(payload.id) ??
+    randomUUID()
+  );
 }
 
-export function trackPing(payload: AnyObject) {
-  pings.push(withTrackedAt(payload));
+function toJsonValue(payload: AnyObject): Prisma.InputJsonValue{
+  return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
 }
 
-export function trackClick(payload: AnyObject) {
-  clicks.push(withTrackedAt(payload));
+async function ensureSession(sessionId: string, payload: AnyObject = {}) {
+  const startTime = asDate(payload.startTime) ?? asDate(payload.timestamp) ?? new Date();
+  const duration = asNumber(payload.duration) ?? 0;
+  const lastPingTime = asDate(payload.lastPingTime) ?? asDate(payload.timestamp) ?? startTime;
+
+  await prisma.session.upsert({
+    where: { id: sessionId },
+    update: {
+      lastPingTime,
+      duration,
+      userAgent: asString(payload.userAgent),
+      deviceType: asString(payload.deviceType),
+      browser: asString(payload.browser),
+      os: asString(payload.os),
+      country: asString(payload.country),
+    },
+    create: {
+      id: sessionId,
+      startTime,
+      lastPingTime,
+      duration,
+      userAgent: asString(payload.userAgent),
+      deviceType: asString(payload.deviceType),
+      browser: asString(payload.browser),
+      os: asString(payload.os),
+      country: asString(payload.country),
+    },
+  });
 }
 
-export function trackGoal(payload: AnyObject) {
-  goals.push(withTrackedAt(payload));
+export async function initDb() {
+  await prisma.$connect();
 }
 
-export function getStats() {
+export async function trackSession(payload: AnyObject) {
+  const sessionId = resolveSessionId(payload);
+  await ensureSession(sessionId, payload);
+  return { sessionId };
+}
+
+export async function trackPageView(payload: AnyObject) {
+  const sessionId = resolveSessionId(payload);
+  await ensureSession(sessionId, payload);
+
+  await prisma.pageView.create({
+    data: {
+      sessionId,
+      path: asString(payload.path) ?? asString(payload.pagePath) ?? "/",
+      timestamp: asDate(payload.timestamp) ?? new Date(),
+      metadata: toJsonValue(payload),
+    },
+  });
+}
+
+export async function trackPing(payload: AnyObject) {
+  const sessionId = resolveSessionId(payload);
+  await ensureSession(sessionId, payload);
+
+  const timestamp = asDate(payload.timestamp) ?? new Date();
+  const duration = asNumber(payload.duration) ?? 0;
+
+  await prisma.ping.create({
+    data: {
+      sessionId,
+      duration,
+      pagePath: asString(payload.pagePath) ?? asString(payload.path),
+      timestamp,
+      metadata: toJsonValue(payload),
+    },
+  });
+
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: {
+      lastPingTime: timestamp,
+      duration,
+    },
+  });
+}
+
+export async function trackClick(payload: AnyObject) {
+  const sessionId = resolveSessionId(payload);
+  await ensureSession(sessionId, payload);
+
+  await prisma.click.create({
+    data: {
+      sessionId,
+      elementTag: asString(payload.elementTag),
+      elementId: asString(payload.elementId),
+      elementClass: asString(payload.elementClass),
+      elementText: asString(payload.elementText),
+      x: asNumber(payload.x) ?? 0,
+      y: asNumber(payload.y) ?? 0,
+      pagePath: asString(payload.pagePath) ?? asString(payload.path) ?? "/",
+      timestamp: asDate(payload.timestamp) ?? new Date(),
+      metadata: toJsonValue(payload),
+    },
+  });
+}
+
+export async function trackGoal(payload: AnyObject) {
+  const maybeSessionId = asString(payload.sessionId) ?? asString(payload.session_id);
+
+  if (maybeSessionId) {
+    await ensureSession(maybeSessionId, payload);
+  }
+
+  await prisma.goal.create({
+    data: {
+      sessionId: maybeSessionId,
+      name: asString(payload.name) ?? asString(payload.goalName) ?? "goal",
+      value: asNumber(payload.value),
+      path: asString(payload.path) ?? asString(payload.pagePath),
+      timestamp: asDate(payload.timestamp) ?? new Date(),
+      metadata: toJsonValue(payload),
+    },
+  });
+}
+
+export async function getStats() {
+  const [sessions, pageViews, pings, clicks, goals] = await Promise.all([
+    prisma.session.count(),
+    prisma.pageView.count(),
+    prisma.ping.count(),
+    prisma.click.count(),
+    prisma.goal.count(),
+  ]);
+
   return {
     startedAt,
     totals: {
-      sessions: sessions.length,
-      pageViews: pageViews.length,
-      pings: pings.length,
-      clicks: clicks.length,
-      goals: goals.length,
+      sessions,
+      pageViews,
+      pings,
+      clicks,
+      goals,
     },
   };
 }
 
-export function createAdminSession(token: string) {
-  adminSessions.add(token);
+export async function createAdminSession(token: string) {
+  await prisma.adminSession.create({
+    data: { id: token },
+  });
 }
 
-export function verifyAdminToken(token: string) {
-  return adminSessions.has(token);
+export async function verifyAdminToken(token: string) {
+  const session = await prisma.adminSession.findUnique({
+    where: { id: token },
+    select: { id: true },
+  });
+
+  return Boolean(session);
 }
 
-export function logoutAdmin(token: string) {
-  adminSessions.delete(token);
+export async function logoutAdmin(token: string) {
+  await prisma.adminSession.deleteMany({
+    where: { id: token },
+  });
 }

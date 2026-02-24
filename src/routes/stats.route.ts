@@ -12,10 +12,10 @@ export async function statsRoutes(app: FastifyInstance) {
       const authHeader = request.headers.authorization;
       if (authHeader?.startsWith("Bearer ")) {
         const token = authHeader.split(" ")[1];
-        verifyAdminToken(token);
+        await verifyAdminToken(token);
       }
 
-      return getStats();
+      return await getStats();
     } catch (error) {
       request.log.error({ err: error }, "Error fetching stats");
       reply.status(500);

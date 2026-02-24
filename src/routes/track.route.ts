@@ -8,7 +8,7 @@ type PayloadBody = {
 export async function trackRoutes(app: FastifyInstance) {
   app.post<PayloadBody>("/api/track/goal", async (request, reply) => {
     try {
-      trackGoal(request.body);
+      await trackGoal(request.body);
       return { success: true };
     } catch (error) {
       request.log.error({ err: error }, "Error tracking goal");
@@ -19,7 +19,7 @@ export async function trackRoutes(app: FastifyInstance) {
 
   app.post<PayloadBody>("/api/track/session", async (request, reply) => {
     try {
-      trackSession(request.body);
+      await trackSession(request.body);
       return { success: true };
     } catch (error) {
       request.log.error({ err: error }, "Error tracking session");
@@ -30,7 +30,7 @@ export async function trackRoutes(app: FastifyInstance) {
 
   app.post<PayloadBody>("/api/track/view", async (request, reply) => {
     try {
-      trackPageView(request.body);
+      await trackPageView(request.body);
       return { success: true };
     } catch (error) {
       request.log.error({ err: error }, "Error tracking view");
@@ -41,7 +41,7 @@ export async function trackRoutes(app: FastifyInstance) {
 
   app.post<PayloadBody>("/api/track/ping", async (request, reply) => {
     try {
-      trackPing(request.body);
+      await trackPing(request.body);
       return { success: true };
     } catch (error) {
       request.log.error({ err: error }, "Error tracking ping");
@@ -52,7 +52,7 @@ export async function trackRoutes(app: FastifyInstance) {
 
   app.post<PayloadBody>("/api/track/click", async (request, reply) => {
     try {
-      trackClick(request.body);
+      await trackClick(request.body);
       return { success: true };
     } catch (error) {
       request.log.error({ err: error }, "Error tracking click");

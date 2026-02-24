@@ -7,7 +7,7 @@ export async function authRoutes(app: FastifyInstance) {
     const _password = request.body?.password;
 
     const token = randomUUID();
-    createAdminSession(token);
+    await createAdminSession(token);
 
     return { token };
   });
@@ -16,7 +16,7 @@ export async function authRoutes(app: FastifyInstance) {
     const authHeader = request.headers.authorization;
     if (authHeader?.startsWith("Bearer ")) {
       const token = authHeader.split(" ")[1];
-      logoutAdmin(token);
+      await logoutAdmin(token);
     }
 
     return { success: true };
